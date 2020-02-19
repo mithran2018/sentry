@@ -162,7 +162,7 @@ class HashDiscarded(Exception):
 
 
 @metrics.wraps("event_manager.save")
-def save_event(data, project_id, raw=False, assume_normalized=False, cache_key=None):
+def save_event(data, project_id, raw=False, cache_key=None):
     """
     After normalizing and processing an event, save adjacent models such as
     releases and environments to postgres and write the event into
@@ -204,7 +204,7 @@ def save_event(data, project_id, raw=False, assume_normalized=False, cache_key=N
 
     # We need to swap out the data with the one internal to the newly
     # created event object
-    event = _get_event_instance(project_id=project_id)
+    event = _get_event_instance(data, project_id=project_id)
     data = event.data.data
 
     event._project_cache = project
