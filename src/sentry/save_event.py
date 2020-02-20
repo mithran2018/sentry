@@ -166,16 +166,18 @@ def save_transaction_events(jobs):
     assert isinstance(jobs, list)
 
     with metrics.timer("save_transaction_events.collect_projects"):
-        project_ids = set(j['project_id'] for j in jobs)
+        project_ids = set(j["project_id"] for j in jobs)
 
     with metrics.timer("save_transaction_events.fetch_projects"):
-        projects = { p.id: p for p in Project.objects.get_many_from_cache(project_ids) }
+        projects = {p.id: p for p in Project.objects.get_many_from_cache(project_ids)}
 
     with metrics.timer("save_transaction_events.collect_organizations"):
         organization_ids = set(p.organization_id for p in six.itervalues(projects))
 
     with metrics.timer("save_transaction_events.fetch_organizations"):
-        organizations = { o.id: o for o in Organization.objects.get_many_from_cache(organization_ids) }
+        organizations = {
+            o.id: o for o in Organization.objects.get_many_from_cache(organization_ids)
+        }
 
     with metrics.timer("save_transaction_events.set_organization_cache"):
         for project in six.itervalues(projects):
@@ -183,53 +185,53 @@ def save_transaction_events(jobs):
 
         del project
 
-    with metrics.timer("save_transaction_events.pull_out_data"):
-        for job in jobs:
-            job['project_id'] = int(job['project_id'])
-
-            data = job['data']
-
-            # Pull the toplevel data we're interested in
-            job['culprit'] = get_culprit(data)
-
-            transaction_name = data.get("transaction")
-            if transaction_name:
-                transaction_name = force_text(transaction_name)
-            job['transaction'] = transaction_name
-
-            job['logger'] = logger_name = data.get("logger")
-            job['release'] = data.get("release")
-            job['dist'] = data.get("dist")
-            job['environment'] = environment = data.get("environment")
-            job['recorded_timestamp'] = data.get("timestamp")
-            job['event'] = event = _get_event_instance(job['data'], project_id=job['project_id']))
-            job['data'] = data = event.data.data
-            event._project_cache = projects[job['project_id']]
-
-            # Some of the data that are toplevel attributes are duplicated
-            # into tags (logger, level, environment, transaction).  These are
-            # different from legacy attributes which are normalized into tags
-            # ahead of time (site, server_name).
-            setdefault_path(data, "tags", value=[])
-            set_tag(data, "level", level)
-            if logger_name:
-                set_tag(data, "logger", logger_name)
-            if environment:
-                set_tag(data, "environment", environment)
-            if transaction_name:
-                set_tag(data, "transaction", transaction_name)
-
-        del job
-        del event
-        del data
-        del logger_name
-        del environment
-        del transaction_name
-
+    _pull_out_data(jobs, projects)
     _get_or_create_release_many(jobs, projects)
-    _get_event_user_many(job, projects)
+    _get_event_user_many(jobs, projects)
     _derive_plugin_tags_many(jobs, projects)
     _derive_interface_tags_many(jobs)
+
+
+@metrics.wraps("save_event.pull_out_data")
+def _pull_out_data(jobs, projects):
+    """
+    A bunch of (probably) CPU bound stuff.
+    """
+
+    for job in jobs:
+        job["project_id"] = int(job["project_id"])
+
+        data = job["data"]
+
+        # Pull the toplevel data we're interested in
+        job["culprit"] = get_culprit(data)
+
+        transaction_name = data.get("transaction")
+        if transaction_name:
+            transaction_name = force_text(transaction_name)
+        job["transaction"] = transaction_name
+
+        job["logger"] = logger_name = data.get("logger")
+        job["release"] = data.get("release")
+        job["dist"] = data.get("dist")
+        job["environment"] = environment = data.get("environment")
+        job["recorded_timestamp"] = data.get("timestamp")
+        job["event"] = event = _get_event_instance(job["data"], project_id=job["project_id"])
+        job["data"] = data = event.data.data
+        event._project_cache = projects[job["project_id"]]
+
+        # Some of the data that are toplevel attributes are duplicated
+        # into tags (logger, level, environment, transaction).  These are
+        # different from legacy attributes which are normalized into tags
+        # ahead of time (site, server_name).
+        setdefault_path(data, "tags", value=[])
+        set_tag(data, "level", data["level"])
+        if logger_name:
+            set_tag(data, "logger", logger_name)
+        if environment:
+            set_tag(data, "environment", environment)
+        if transaction_name:
+            set_tag(data, "transaction", transaction_name)
 
 
 @metrics.wraps("save_event.get_or_create_release_many")
@@ -238,57 +240,55 @@ def _get_or_create_release_many(jobs, projects):
     release_date_added = {}
 
     for job in jobs:
-        if not job['release']:
+        if not job["release"]:
             continue
 
-        release_key = (job['project_id'], job['release'])
+        release_key = (job["project_id"], job["release"])
         jobs_with_releases.setdefault(release_key, []).append(job)
-        new_datetime = job['event'].datetime
+        new_datetime = job["event"].datetime
         old_datetime = release_date_added.get(release_key)
-        if old_datetimes is None or new_datetime > old_datetime:
+        if old_datetime is None or new_datetime > old_datetime:
             release_date_added[release_key] = new_datetime
 
     for (project_id, version), jobs_to_update in six.iteritems(jobs_with_releases):
         release = Release.get_or_create(
             project=projects[project_id],
             version=version,
-            date_added=release_date_added[(project_id, version)]
+            date_added=release_date_added[(project_id, version)],
         )
 
         for job in jobs_to_update:
             # dont allow a conflicting 'release' tag
-            data = job['data']
+            data = job["data"]
             pop_tag(data, "release")
             set_tag(data, "sentry:release", release.version)
+
+            job["release"] = release
 
 
 @metrics.wraps("save_event.get_event_user_many")
 def _get_event_user_many(jobs, projects):
-    event_users = []
-
     for job in jobs:
-        user = _get_event_user(projects[job['project_id']])
-        data = job['data']
-        event_users.append(user)
+        user = _get_event_user(projects[job["project_id"]])
+        data = job["data"]
 
         if user:
             pop_tag(data, "user")
-            set_tag(data, "sentry:user", event_user.tag_value)
+            set_tag(data, "sentry:user", user.tag_value)
+
+        job["user"] = user
 
 
 @metrics.wraps("save_event.derive_plugin_tags_many")
 def _derive_plugin_tags_many(jobs, projects):
     # XXX: We ought to inline or remove this one for sure
-    plugins_for_projects = {
-        p.id: plugins.for_project(p, version=None)
-        for p in projects
-    }
+    plugins_for_projects = {p.id: plugins.for_project(p, version=None) for p in projects}
 
     for job in jobs:
-        for plugin in plugins_for_projects[job['project_id']]:
-            added_tags = safe_execute(plugin.get_tags, job['event'], _with_transaction=False)
+        for plugin in plugins_for_projects[job["project_id"]]:
+            added_tags = safe_execute(plugin.get_tags, job["event"], _with_transaction=False)
             if added_tags:
-                data = job['data']
+                data = job["data"]
                 # plugins should not override user provided tags
                 for key, value in added_tags:
                     if get_tag(data, key) is None:
@@ -299,13 +299,152 @@ def _derive_plugin_tags_many(jobs, projects):
 def _derive_interface_tags_many(jobs):
     # XXX: We ought to inline or remove this one for sure
     for job in jobs:
-        for path, iface in six.iteritems(job['event'].interfaces):
+        data = job["data"]
+        for path, iface in six.iteritems(job["event"].interfaces):
             for k, v in iface.iter_tags():
                 set_tag(data, k, v)
 
             # Get rid of ephemeral interface data
             if iface.ephemeral:
                 data.pop(iface.path, None)
+
+
+@metrics.wraps("save_event.materialize_metadata_many")
+def _materialize_metadata_many(jobs):
+    for job in jobs:
+        # we want to freeze not just the metadata and type in but also the
+        # derived attributes.  The reason for this is that we push this
+        # data into kafka for snuba processing and our postprocessing
+        # picks up the data right from the snuba topic.  For most usage
+        # however the data is dynamically overridden by Event.title and
+        # Event.location (See Event.as_dict)
+        data = job["data"]
+        job["materialized_metadata"] = metadata = materialize_metadata(data)
+        data.update(metadata)
+        data["culprit"] = job["culprit"]
+
+
+@metrics.wraps("save_event.send_event_saved_signal_many")
+def _send_event_saved_signal_many(jobs, projects):
+    for job in jobs:
+        event_saved.send_robust(
+            project=projects[job["project_id"]],
+            event_size=job["event"].size,
+            sender=_send_event_saved_signal_many,
+        )
+
+
+@metrics.wraps("save_event.get_or_create_environment_many")
+def _get_or_create_environment_many(jobs, projects):
+    for job in jobs:
+        job["environment"] = Environment.get_or_create(
+            project=projects[job["project_id"]], name=job["environment"]
+        )
+
+
+@metrics.wraps("save_event.get_or_create_release_associated_models")
+def _get_or_create_release_associated_models(jobs, projects):
+    # XXX: This is possibly unnecessarily detached from
+    # _get_or_create_release_many, but we do not want to destroy order of
+    # execution right now
+    for job in jobs:
+        release = job["release"]
+        if not release:
+            continue
+
+        project = projects[job["project_id"]]
+        environment = job["environment"]
+        date = job["event"].datetime
+
+        ReleaseEnvironment.get_or_create(
+            project=project, release=release, environment=environment, datetime=date
+        )
+
+        ReleaseProjectEnvironment.get_or_create(
+            project=project, release=release, environment=environment, datetime=date
+        )
+
+
+@metrics.wraps("save_event.tsdb_record_all_metrics")
+def _tsdb_record_all_metrics(jobs):
+    """
+    Do all tsdb-related things for save_event in here s.t. we can potentially
+    put everything in a single redis pipeline someday.
+    """
+
+    # XXX: validate whether anybody actually uses those metrics
+
+    for job in jobs:
+        incrs = []
+        frequencies = []
+        records = []
+
+        incrs.append((tsdb.models.project, job["project_id"]))
+        event = job["event"]
+        group = job["group"]
+        release = job["release"]
+        environment = job["environment"]
+
+        if group:
+            incrs.append((tsdb.models.group, group.id))
+            frequencies.append(
+                tsdb.models.frequent_environments_by_group, {group.id: {environment.id: 1}}
+            )
+
+            if release:
+                frequencies.append(
+                    (
+                        tsdb.models.frequent_releases_by_group,
+                        {group.id: {job["grouprelease"].id: 1}},
+                    )
+                )
+
+        if release:
+            incrs.append((tsdb.models.release, release.id))
+
+        user = job["user"]
+
+        if user:
+            project_id = job["project_id"]
+            records.append((tsdb.models.user_affected_by_project, project_id, (user.tag_value,)))
+
+            if group:
+                records.append((tsdb.models.users_affected_by_group, group.id))
+
+        if incrs:
+            tsdb.incr_multi(incrs, timestamp=event.datetime, environment_id=environment.id)
+
+        if records:
+            tsdb.record_multi(records, timestamp=event.datetime, environment=environment.id)
+
+        if frequencies:
+            tsdb.record_frequency_multi(frequencies, timestamp=event.datetime)
+
+
+@metrics.wraps("save_event.nodestore_save_many")
+def _nodestore_save_many(jobs):
+    for job in jobs:
+        # Write the event to Nodestore
+        job["event"].data.save()
+
+
+@metrics.wraps("save_event.eventstream_insert_many")
+def _eventstream_insert_many(jobs):
+    for job in jobs:
+        eventstream.insert(
+            group=job["group"],
+            event=job["event"],
+            is_new=job["is_new"],
+            is_regression=job["is_regression"],
+            is_new_group_environment=job["is_new_group_environment"],
+            primary_hash=job["data"]["hashes"][0],
+            # We are choosing to skip consuming the event back
+            # in the eventstream if it's flagged as raw.
+            # This means that we want to publish the event
+            # through the event stream, but we don't care
+            # about post processing and handling the commit.
+            skip_consume=job.get("raw", False),
+        )
 
 
 @metrics.wraps("event_manager.save")
@@ -336,99 +475,45 @@ def save_event(data, project_id, raw=False, cache_key=None):
             id=project.organization_id
         )
 
-    # Pull out the culprit
-    culprit = get_culprit(data)
+    job = {"data": data, "project_id": project_id, "raw": raw}
+    del data
+    jobs = [job]
+    projects = {project.id: project}
 
-    # Pull the toplevel data we're interested in
-    level = data.get("level")
-
-    transaction_name = data.get("transaction")
-    logger_name = data.get("logger")
-    release = data.get("release")
-    dist = data.get("dist")
-    environment = data.get("environment")
-    recorded_timestamp = data.get("timestamp")
-
-    # We need to swap out the data with the one internal to the newly
-    # created event object
-    event = _get_event_instance(data, project_id=project_id)
-    data = event.data.data
-
-    event._project_cache = project
-
-    date = event.datetime
-    platform = event.platform
-    event_id = event.event_id
-
-    if transaction_name:
-        transaction_name = force_text(transaction_name)
+    _pull_out_data(jobs, projects)
 
     # Right now the event type is the signal to skip the group. This
     # is going to change a lot.
-    if event.get_event_type() == "transaction":
+    if job["event"].get_event_type() == "transaction":
         issueless_event = True
     else:
         issueless_event = False
 
-    # Some of the data that are toplevel attributes are duplicated
-    # into tags (logger, level, environment, transaction).  These are
-    # different from legacy attributes which are normalized into tags
-    # ahead of time (site, server_name).
-    setdefault_path(data, "tags", value=[])
-    set_tag(data, "level", level)
-    if logger_name:
-        set_tag(data, "logger", logger_name)
-    if environment:
-        set_tag(data, "environment", environment)
-    if transaction_name:
-        set_tag(data, "transaction", transaction_name)
+    _get_or_create_release_many(jobs, projects)
 
-    if release:
-        # dont allow a conflicting 'release' tag
-        pop_tag(data, "release")
-        release = Release.get_or_create(project=project, version=release, date_added=date)
-        set_tag(data, "sentry:release", release.version)
-
-    if dist and release:
-        dist = release.add_dist(dist, date)
+    # XXX: remove
+    if job["dist"] and job["release"]:
+        job["dist"] = job["release"].add_dist(job["dist"], job["event"].datetime)
         # dont allow a conflicting 'dist' tag
-        pop_tag(data, "dist")
-        set_tag(data, "sentry:dist", dist.name)
+        pop_tag(job["data"], "dist")
+        set_tag(job["data"], "sentry:dist", job["dist"].name)
     else:
-        dist = None
+        job["dist"] = None
 
-    event_user = _get_event_user(project, data)
-    if event_user:
-        # dont allow a conflicting 'user' tag
-        pop_tag(data, "user")
-        set_tag(data, "sentry:user", event_user.tag_value)
+    _get_event_user_many(jobs, projects)
 
     with metrics.timer("event_manager.load_grouping_config"):
         # At this point we want to normalize the in_app values in case the
         # clients did not set this appropriately so far.
         grouping_config = load_grouping_config(
-            get_grouping_config_dict_for_event_data(data, project)
+            get_grouping_config_dict_for_event_data(job["data"], project)
         )
 
     with metrics.timer("event_manager.normalize_stacktraces_for_grouping"):
-        normalize_stacktraces_for_grouping(data, grouping_config)
+        normalize_stacktraces_for_grouping(job["data"], grouping_config)
 
-    with metrics.timer("event_manager.plugins"):
-        for plugin in plugins.for_project(project, version=None):
-            added_tags = safe_execute(plugin.get_tags, event, _with_transaction=False)
-            if added_tags:
-                # plugins should not override user provided tags
-                for key, value in added_tags:
-                    if get_tag(data, key) is None:
-                        set_tag(data, key, value)
-
-    with metrics.timer("event_manager.set_tags"):
-        for path, iface in six.iteritems(event.interfaces):
-            for k, v in iface.iter_tags():
-                set_tag(data, k, v)
-            # Get rid of ephemeral interface data
-            if iface.ephemeral:
-                data.pop(iface.path, None)
+    _derive_plugin_tags_many(jobs, projects)
+    _derive_interface_tags_many(jobs, projects)
 
     with metrics.timer("event_manager.apply_server_fingerprinting"):
         # The active grouping config was put into the event in the
@@ -436,58 +521,51 @@ def save_event(data, project_id, raw=False, cache_key=None):
         # fingerprint was set to `'{{ default }}' just in case someone
         # removed it from the payload.  The call to get_hashes will then
         # look at `grouping_config` to pick the right parameters.
-        data["fingerprint"] = data.get("fingerprint") or ["{{ default }}"]
-        apply_server_fingerprinting(data, get_fingerprinting_config_for_project(project))
+        job["data"]["fingerprint"] = job["data"].get("fingerprint") or ["{{ default }}"]
+        apply_server_fingerprinting(job["data"], get_fingerprinting_config_for_project(project))
 
     with metrics.timer("event_manager.event.get_hashes"):
         # Here we try to use the grouping config that was requested in the
         # event.  If that config has since been deleted (because it was an
         # experimental grouping config) we fall back to the default.
         try:
-            hashes = event.get_hashes()
+            hashes = job["event"].get_hashes()
         except GroupingConfigNotFound:
-            data["grouping_config"] = get_grouping_config_dict_for_project(project)
-            hashes = event.get_hashes()
+            job["data"]["grouping_config"] = get_grouping_config_dict_for_project(project)
+            hashes = job["event"].get_hashes()
 
-    data["hashes"] = hashes
+    job["data"]["hashes"] = hashes
 
-    with metrics.timer("event_manager.materialize_metadata"):
-        # we want to freeze not just the metadata and type in but also the
-        # derived attributes.  The reason for this is that we push this
-        # data into kafka for snuba processing and our postprocessing
-        # picks up the data right from the snuba topic.  For most usage
-        # however the data is dynamically overridden by Event.title and
-        # Event.location (See Event.as_dict)
-        materialized_metadata = materialize_metadata(data)
-        data.update(materialized_metadata)
-        data["culprit"] = culprit
+    _materialize_metadata_many(jobs)
 
-    received_timestamp = event.data.get("received") or float(event.datetime.strftime("%s"))
+    received_timestamp = job["event"].data.get("received") or float(
+        job["event"].datetime.strftime("%s")
+    )
 
     if not issueless_event:
         # The group gets the same metadata as the event when it's flushed but
         # additionally the `last_received` key is set.  This key is used by
         # _save_aggregate.
-        group_metadata = dict(materialized_metadata)
+        group_metadata = dict(job["materialized_metadata"])
         group_metadata["last_received"] = received_timestamp
         kwargs = {
-            "platform": platform,
-            "message": event.search_message,
-            "culprit": culprit,
-            "logger": logger_name,
-            "level": LOG_LEVELS_MAP.get(level),
-            "last_seen": date,
-            "first_seen": date,
-            "active_at": date,
+            "platform": job["platform"],
+            "message": job["event"].search_message,
+            "culprit": job["culprit"],
+            "logger": job["logger_name"],
+            "level": LOG_LEVELS_MAP.get(job["level"]),
+            "last_seen": job["event"].datetime,
+            "first_seen": job["event"].datetime,
+            "active_at": job["event"].datetime,
             "data": group_metadata,
         }
 
-        if release:
-            kwargs["first_release"] = release
+        if job["release"]:
+            kwargs["first_release"] = job["release"]
 
         try:
-            group, is_new, is_regression = _save_aggregate(
-                event=event, hashes=hashes, release=release, **kwargs
+            job["group"], job["is_new"], job["is_regression"] = _save_aggregate(
+                event=job["event"], hashes=hashes, release=job["release"], **kwargs
             )
         except HashDiscarded:
             event_discarded.send_robust(project=project, sender=save_event)
@@ -495,163 +573,111 @@ def save_event(data, project_id, raw=False, cache_key=None):
             metrics.incr(
                 "events.discarded",
                 skip_internal=True,
-                tags={"organization_id": project.organization_id, "platform": platform},
+                tags={"organization_id": project.organization_id, "platform": job["platform"]},
             )
             raise
-        event.group = group
+        job["event"].group = job["group"]
     else:
-        group = None
-        is_new = False
-        is_regression = False
+        job["group"] = None
+        job["is_new"] = False
+        job["is_regression"] = False
 
-    with metrics.timer("event_manager.event_saved_signal"):
-        event_saved.send_robust(project=project, event_size=event.size, sender=save_event)
+    _send_event_saved_signal_many(jobs, projects)
 
     # store a reference to the group id to guarantee validation of isolation
-    event.data.bind_ref(event)
+    # XXX(markus): No clue what this does
+    job["event"].data.bind_ref(job["event"])
 
-    environment = Environment.get_or_create(project=project, name=environment)
+    _get_or_create_environment_many(jobs, projects)
 
-    if group:
-        group_environment, is_new_group_environment = GroupEnvironment.get_or_create(
-            group_id=group.id,
-            environment_id=environment.id,
-            defaults={"first_release": release if release else None},
+    if job["group"]:
+        group_environment, job["is_new_group_environment"] = GroupEnvironment.get_or_create(
+            group_id=job["group"].id,
+            environment_id=job["environment"].id,
+            defaults={"first_release": job["release"] or None},
         )
     else:
-        is_new_group_environment = False
+        job["is_new_group_environment"] = False
 
-    if release:
-        ReleaseEnvironment.get_or_create(
-            project=project, release=release, environment=environment, datetime=date
+    _get_or_create_release_associated_models(jobs, projects)
+
+    if job["release"] and job["group"]:
+        job["grouprelease"] = GroupRelease.get_or_create(
+            group=job["group"],
+            release=job["release"],
+            environment=job["environment"],
+            datetime=job["event"].datetime,
         )
 
-        ReleaseProjectEnvironment.get_or_create(
-            project=project, release=release, environment=environment, datetime=date
-        )
+    _tsdb_record_all_metrics(jobs)
 
-        if group:
-            grouprelease = GroupRelease.get_or_create(
-                group=group, release=release, environment=environment, datetime=date
-            )
-
-    counters = [(tsdb.models.project, project.id)]
-
-    if group:
-        counters.append((tsdb.models.group, group.id))
-
-    if release:
-        counters.append((tsdb.models.release, release.id))
-
-    with metrics.timer("event_manager.tsdb_incr_group_and_release_counters") as metrics_tags:
-        metrics_tags["has_group"] = "true" if group else "false"
-        tsdb.incr_multi(counters, timestamp=event.datetime, environment_id=environment.id)
-
-    frequencies = []
-
-    if group:
-        frequencies.append(
-            (tsdb.models.frequent_environments_by_group, {group.id: {environment.id: 1}})
-        )
-
-        if release:
-            frequencies.append(
-                (tsdb.models.frequent_releases_by_group, {group.id: {grouprelease.id: 1}})
-            )
-    if frequencies:
-        tsdb.record_frequency_multi(frequencies, timestamp=event.datetime)
-
-    if group:
-        UserReport.objects.filter(project=project, event_id=event_id).update(
-            group=group, environment=environment
+    if job["group"]:
+        UserReport.objects.filter(project=project, event_id=job["event"].event_id).update(
+            group=job["group"], environment=job["environment"]
         )
 
     # Enusre the _metrics key exists. This is usually created during
     # and prefilled with ingestion sizes.
-    event_metrics = event.data.get("_metrics") or {}
-    event.data["_metrics"] = event_metrics
+    event_metrics = job["event"].data.get("_metrics") or {}
+    job["event"].data["_metrics"] = event_metrics
 
     # Capture the actual size that goes into node store.
-    event_metrics["bytes.stored.event"] = len(json.dumps(dict(event.data.items())))
+    event_metrics["bytes.stored.event"] = len(json.dumps(dict(job["event"].data.items())))
 
     if not issueless_event:
         # Load attachments first, but persist them at the very last after
         # posting to eventstream to make sure all counters and eventstream are
         # incremented for sure.
-        attachments = get_attachments(cache_key, event)
+        attachments = get_attachments(cache_key, job["event"])
         for attachment in attachments:
             key = "bytes.stored.%s" % (attachment.type,)
             event_metrics[key] = (event_metrics.get(key) or 0) + len(attachment.data)
 
-    with metrics.timer("event_manager.nodestore.save"):
-        # Write the event to Nodestore
-        event.data.save()
+    _nodestore_save_many(jobs)
 
-    if event_user:
-        counters = [(tsdb.models.users_affected_by_project, project.id, (event_user.tag_value,))]
-
-        if group:
-            counters.append(
-                (tsdb.models.users_affected_by_group, group.id, (event_user.tag_value,))
-            )
-
-        with metrics.timer("event_manager.tsdb_record_users_affected") as metrics_tags:
-            metrics_tags["has_group"] = "true" if group else "false"
-            tsdb.record_multi(counters, timestamp=event.datetime, environment_id=environment.id)
-
-    if release:
-        if is_new:
+    if job["release"] and not issueless_event:
+        if job["is_new"]:
             buffer.incr(
                 ReleaseProject,
                 {"new_groups": 1},
-                {"release_id": release.id, "project_id": project.id},
+                {"release_id": job["release"].id, "project_id": project.id},
             )
-        if is_new_group_environment:
+        if job["is_new_group_environment"]:
             buffer.incr(
                 ReleaseProjectEnvironment,
                 {"new_issues_count": 1},
                 {
                     "project_id": project.id,
-                    "release_id": release.id,
-                    "environment_id": environment.id,
+                    "release_id": job["release"].id,
+                    "environment_id": job["environment"].id,
                 },
             )
 
     if not raw:
         if not project.first_event:
-            project.update(first_event=date)
-            first_event_received.send_robust(project=project, event=event, sender=Project)
+            project.update(first_event=job["event"].datetime)
+            first_event_received.send_robust(project=project, event=job["event"], sender=Project)
 
-    with metrics.timer("event_manager.eventstream.insert"):
-        eventstream.insert(
-            group=group,
-            event=event,
-            is_new=is_new,
-            is_regression=is_regression,
-            is_new_group_environment=is_new_group_environment,
-            primary_hash=hashes[0],
-            # We are choosing to skip consuming the event back
-            # in the eventstream if it's flagged as raw.
-            # This means that we want to publish the event
-            # through the event stream, but we don't care
-            # about post processing and handling the commit.
-            skip_consume=raw,
-        )
+    _eventstream_insert_many(jobs)
 
     if not issueless_event:
         # Do this last to ensure signals get emitted even if connection to the
         # file store breaks temporarily.
-        save_attachments(attachments, event)
+        save_attachments(attachments, job["event"])
 
-    metric_tags = {"from_relay": "_relay_processed" in data}
+    metric_tags = {"from_relay": "_relay_processed" in job["data"]}
 
-    metrics.timing("events.latency", received_timestamp - recorded_timestamp, tags=metric_tags)
-    metrics.timing("events.size.data.post_save", event.size, tags=metric_tags)
+    metrics.timing(
+        "events.latency", received_timestamp - job["recorded_timestamp"], tags=metric_tags
+    )
+    metrics.timing("events.size.data.post_save", job["event"].size, tags=metric_tags)
     metrics.incr(
-        "events.post_save.normalize.errors", amount=len(data.get("errors") or ()), tags=metric_tags
+        "events.post_save.normalize.errors",
+        amount=len(job["data"].get("errors") or ()),
+        tags=metric_tags,
     )
 
-    return event
+    return job["event"]
 
 
 @metrics.wraps("event_manager.get_event_instance")
