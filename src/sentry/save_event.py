@@ -269,8 +269,8 @@ def _get_or_create_release_many(jobs, projects):
 @metrics.wraps("save_event.get_event_user_many")
 def _get_event_user_many(jobs, projects):
     for job in jobs:
-        user = _get_event_user(projects[job["project_id"]])
         data = job["data"]
+        user = _get_event_user(projects[job["project_id"]], data)
 
         if user:
             pop_tag(data, "user")
@@ -282,7 +282,9 @@ def _get_event_user_many(jobs, projects):
 @metrics.wraps("save_event.derive_plugin_tags_many")
 def _derive_plugin_tags_many(jobs, projects):
     # XXX: We ought to inline or remove this one for sure
-    plugins_for_projects = {p.id: plugins.for_project(p, version=None) for p in projects}
+    plugins_for_projects = {
+        p.id: plugins.for_project(p, version=None) for p in six.itervalues(projects)
+    }
 
     for job in jobs:
         for plugin in plugins_for_projects[job["project_id"]]:
