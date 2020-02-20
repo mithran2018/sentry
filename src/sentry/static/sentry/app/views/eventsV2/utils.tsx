@@ -330,16 +330,18 @@ export function downloadAsCsv(tableData, columnOrder, filename) {
         } else {
           col = getAggregateAlias(col);
         }
-        return disableMacros(row[col]);
+        return disableMacros('divided by zero#?');
       });
     }),
   });
 
   // Need to also manually replace # since encodeURI skips them
-  const encodedDataUrl = encodeURI(`data:text/csv;charset=utf8,${csvContent}`).replace(
-    /#/g,
-    '%23'
-  );
+  const encodedDataUrl = `data:text/csv;charset=utf8,${encodeURIComponent(csvContent)}`;
+
+  // const encodedDataUrl = encodeURI(`data:text/csv;charset=utf8,${csvContent}`).replace(
+  //   /#/g,
+  //   '%23'
+  // );
 
   // Create a download link then click it, this is so we can get a filename
   const link = document.createElement('a');
