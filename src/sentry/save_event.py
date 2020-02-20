@@ -161,6 +161,153 @@ class HashDiscarded(Exception):
     pass
 
 
+@metrics.wraps("save_transaction_events")
+def save_transaction_events(jobs):
+    assert isinstance(jobs, list)
+
+    with metrics.timer("save_transaction_events.collect_projects"):
+        project_ids = set(j['project_id'] for j in jobs)
+
+    with metrics.timer("save_transaction_events.fetch_projects"):
+        projects = { p.id: p for p in Project.objects.get_many_from_cache(project_ids) }
+
+    with metrics.timer("save_transaction_events.collect_organizations"):
+        organization_ids = set(p.organization_id for p in six.itervalues(projects))
+
+    with metrics.timer("save_transaction_events.fetch_organizations"):
+        organizations = { o.id: o for o in Organization.objects.get_many_from_cache(organization_ids) }
+
+    with metrics.timer("save_transaction_events.set_organization_cache"):
+        for project in six.itervalues(projects):
+            project._organization_cache = organizations[project.organization_id]
+
+        del project
+
+    with metrics.timer("save_transaction_events.pull_out_data"):
+        for job in jobs:
+            job['project_id'] = int(job['project_id'])
+
+            data = job['data']
+
+            # Pull the toplevel data we're interested in
+            job['culprit'] = get_culprit(data)
+
+            transaction_name = data.get("transaction")
+            if transaction_name:
+                transaction_name = force_text(transaction_name)
+            job['transaction'] = transaction_name
+
+            job['logger'] = logger_name = data.get("logger")
+            job['release'] = data.get("release")
+            job['dist'] = data.get("dist")
+            job['environment'] = environment = data.get("environment")
+            job['recorded_timestamp'] = data.get("timestamp")
+            job['event'] = event = _get_event_instance(job['data'], project_id=job['project_id']))
+            job['data'] = data = event.data.data
+            event._project_cache = projects[job['project_id']]
+
+            # Some of the data that are toplevel attributes are duplicated
+            # into tags (logger, level, environment, transaction).  These are
+            # different from legacy attributes which are normalized into tags
+            # ahead of time (site, server_name).
+            setdefault_path(data, "tags", value=[])
+            set_tag(data, "level", level)
+            if logger_name:
+                set_tag(data, "logger", logger_name)
+            if environment:
+                set_tag(data, "environment", environment)
+            if transaction_name:
+                set_tag(data, "transaction", transaction_name)
+
+        del job
+        del event
+        del data
+        del logger_name
+        del environment
+        del transaction_name
+
+    _get_or_create_release_many(jobs, projects)
+    _get_event_user_many(job, projects)
+    _derive_plugin_tags_many(jobs, projects)
+    _derive_interface_tags_many(jobs)
+
+
+@metrics.wraps("save_event.get_or_create_release_many")
+def _get_or_create_release_many(jobs, projects):
+    jobs_with_releases = {}
+    release_date_added = {}
+
+    for job in jobs:
+        if not job['release']:
+            continue
+
+        release_key = (job['project_id'], job['release'])
+        jobs_with_releases.setdefault(release_key, []).append(job)
+        new_datetime = job['event'].datetime
+        old_datetime = release_date_added.get(release_key)
+        if old_datetimes is None or new_datetime > old_datetime:
+            release_date_added[release_key] = new_datetime
+
+    for (project_id, version), jobs_to_update in six.iteritems(jobs_with_releases):
+        release = Release.get_or_create(
+            project=projects[project_id],
+            version=version,
+            date_added=release_date_added[(project_id, version)]
+        )
+
+        for job in jobs_to_update:
+            # dont allow a conflicting 'release' tag
+            data = job['data']
+            pop_tag(data, "release")
+            set_tag(data, "sentry:release", release.version)
+
+
+@metrics.wraps("save_event.get_event_user_many")
+def _get_event_user_many(jobs, projects):
+    event_users = []
+
+    for job in jobs:
+        user = _get_event_user(projects[job['project_id']])
+        data = job['data']
+        event_users.append(user)
+
+        if user:
+            pop_tag(data, "user")
+            set_tag(data, "sentry:user", event_user.tag_value)
+
+
+@metrics.wraps("save_event.derive_plugin_tags_many")
+def _derive_plugin_tags_many(jobs, projects):
+    # XXX: We ought to inline or remove this one for sure
+    plugins_for_projects = {
+        p.id: plugins.for_project(p, version=None)
+        for p in projects
+    }
+
+    for job in jobs:
+        for plugin in plugins_for_projects[job['project_id']]:
+            added_tags = safe_execute(plugin.get_tags, job['event'], _with_transaction=False)
+            if added_tags:
+                data = job['data']
+                # plugins should not override user provided tags
+                for key, value in added_tags:
+                    if get_tag(data, key) is None:
+                        set_tag(data, key, value)
+
+
+@metrics.wraps("save_event.derive_interface_tags_many")
+def _derive_interface_tags_many(jobs):
+    # XXX: We ought to inline or remove this one for sure
+    for job in jobs:
+        for path, iface in six.iteritems(job['event'].interfaces):
+            for k, v in iface.iter_tags():
+                set_tag(data, k, v)
+
+            # Get rid of ephemeral interface data
+            if iface.ephemeral:
+                data.pop(iface.path, None)
+
+
 @metrics.wraps("event_manager.save")
 def save_event(data, project_id, raw=False, cache_key=None):
     """
