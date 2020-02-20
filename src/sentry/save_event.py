@@ -161,37 +161,6 @@ class HashDiscarded(Exception):
     pass
 
 
-@metrics.wraps("save_transaction_events")
-def save_transaction_events(jobs):
-    assert isinstance(jobs, list)
-
-    with metrics.timer("save_transaction_events.collect_projects"):
-        project_ids = set(j["project_id"] for j in jobs)
-
-    with metrics.timer("save_transaction_events.fetch_projects"):
-        projects = {p.id: p for p in Project.objects.get_many_from_cache(project_ids)}
-
-    with metrics.timer("save_transaction_events.collect_organizations"):
-        organization_ids = set(p.organization_id for p in six.itervalues(projects))
-
-    with metrics.timer("save_transaction_events.fetch_organizations"):
-        organizations = {
-            o.id: o for o in Organization.objects.get_many_from_cache(organization_ids)
-        }
-
-    with metrics.timer("save_transaction_events.set_organization_cache"):
-        for project in six.itervalues(projects):
-            project._organization_cache = organizations[project.organization_id]
-
-        del project
-
-    _pull_out_data(jobs, projects)
-    _get_or_create_release_many(jobs, projects)
-    _get_event_user_many(jobs, projects)
-    _derive_plugin_tags_many(jobs, projects)
-    _derive_interface_tags_many(jobs)
-
-
 @metrics.wraps("save_event.pull_out_data")
 def _pull_out_data(jobs, projects):
     """
@@ -515,7 +484,7 @@ def save_event(data, project_id, raw=False, cache_key=None):
         normalize_stacktraces_for_grouping(job["data"], grouping_config)
 
     _derive_plugin_tags_many(jobs, projects)
-    _derive_interface_tags_many(jobs, projects)
+    _derive_interface_tags_many(jobs)
 
     with metrics.timer("event_manager.apply_server_fingerprinting"):
         # The active grouping config was put into the event in the
