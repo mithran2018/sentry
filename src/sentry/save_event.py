@@ -180,13 +180,15 @@ def _pull_out_data(jobs, projects):
             transaction_name = force_text(transaction_name)
         job["transaction"] = transaction_name
 
-        job["logger"] = logger_name = data.get("logger")
+        job["logger_name"] = logger_name = data.get("logger")
+        job["level"] = level = data.get("level")
         job["release"] = data.get("release")
         job["dist"] = data.get("dist")
         job["environment"] = environment = data.get("environment")
         job["recorded_timestamp"] = data.get("timestamp")
         job["event"] = event = _get_event_instance(job["data"], project_id=job["project_id"])
         job["data"] = data = event.data.data
+        job["platform"] = event.platform
         event._project_cache = projects[job["project_id"]]
 
         # Some of the data that are toplevel attributes are duplicated
@@ -194,7 +196,7 @@ def _pull_out_data(jobs, projects):
         # different from legacy attributes which are normalized into tags
         # ahead of time (site, server_name).
         setdefault_path(data, "tags", value=[])
-        set_tag(data, "level", data["level"])
+        set_tag(data, "level", level)
         if logger_name:
             set_tag(data, "logger", logger_name)
         if environment:
@@ -359,7 +361,7 @@ def _tsdb_record_all_metrics(jobs):
         if group:
             incrs.append((tsdb.models.group, group.id))
             frequencies.append(
-                tsdb.models.frequent_environments_by_group, {group.id: {environment.id: 1}}
+                (tsdb.models.frequent_environments_by_group, {group.id: {environment.id: 1}})
             )
 
             if release:
