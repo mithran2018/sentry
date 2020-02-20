@@ -379,16 +379,16 @@ def _tsdb_record_all_metrics(jobs):
 
         if user:
             project_id = job["project_id"]
-            records.append((tsdb.models.user_affected_by_project, project_id, (user.tag_value,)))
+            records.append((tsdb.models.users_affected_by_project, project_id, (user.tag_value,)))
 
             if group:
-                records.append((tsdb.models.users_affected_by_group, group.id))
+                records.append((tsdb.models.users_affected_by_group, group.id, (user.tag_value,)))
 
         if incrs:
             tsdb.incr_multi(incrs, timestamp=event.datetime, environment_id=environment.id)
 
         if records:
-            tsdb.record_multi(records, timestamp=event.datetime, environment=environment.id)
+            tsdb.record_multi(records, timestamp=event.datetime, environment_id=environment.id)
 
         if frequencies:
             tsdb.record_frequency_multi(frequencies, timestamp=event.datetime)

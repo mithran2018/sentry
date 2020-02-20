@@ -17,7 +17,7 @@ from sentry.app import tsdb
 from sentry.constants import MAX_VERSION_LENGTH
 from sentry.eventstore.models import Event
 from sentry.event_manager import EventManager
-from sentry.save_event import HashDiscarded, EventUser, save_event
+from sentry.save_event import HashDiscarded, EventUser
 from sentry.grouping.utils import hash_from_values
 from sentry.models import (
     Activity,
@@ -1025,7 +1025,7 @@ class EventManagerTest(TestCase):
 
         assert not mock_event_saved.called
         assert_mock_called_once_with_partial(
-            mock_event_discarded, project=group.project, sender=save_event, signal=event_discarded
+            mock_event_discarded, project=group.project, signal=event_discarded
         )
 
     def test_event_saved_signal(self):
@@ -1037,7 +1037,7 @@ class EventManagerTest(TestCase):
         event = manager.save(1)
 
         assert_mock_called_once_with_partial(
-            mock_event_saved, project=event.group.project, sender=save_event, signal=event_saved
+            mock_event_saved, project=event.group.project, signal=event_saved
         )
 
     def test_checksum_rehashed(self):
